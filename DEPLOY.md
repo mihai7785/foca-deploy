@@ -262,21 +262,86 @@ not re-read `.env`, so an `IMAGE_TAG` change goes unnoticed.
 
 ## 9. Rollback procedure
 
-1. Edit `/srv/foca/.env` and set `IMAGE_TAG` to a known-good prior
-   version (e.g. `v2.25.2`).
-2. `docker compose pull` — confirms the older image is still in GHCR.
-3. `docker compose up -d` — recreates containers off the older image.
+Three distinct recovery scenarios. Pick the right one for the
+failure mode — image-tag rollback is fast and lossless when data
+is intact; the other two involve data restore from PBS and should
+be reserved for actual data damage.
 
-**Image rollback does not roll back data.** Database migrations
-applied during the newer version's run remain applied. If a release
-introduced a breaking schema change, you also need to:
+### Scenario 1 — Bad release (image-tag rollback)
 
-* Stop the stack: `docker compose down`.
-* Restore database files from backup (see § 10).
-* Start with the older `IMAGE_TAG`.
+Use when a new version misbehaves but data is intact (UI broken,
+backend errors, regression in a feature). No data restore needed.
+This is the common case and takes under a minute.
 
-For this reason, **take a backup of `/srv/foca/data/sqlite/`
-immediately before any update.**
+```bash
+# On the deploy host, in /srv/foca:
+sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=vX.Y.Z/' .env  # previous known-good
+docker compose pull
+docker compose up -d
+docker compose ps  # confirm healthy
+```
+
+If the previous tag's images are no longer in your local cache, the
+pull fetches them from GHCR. As long as the tag still exists on GHCR
+(release tags are kept indefinitely), this works.
+
+Caveat: an image rollback does not roll back schema migrations
+applied during the newer version's run. Forward-only migrations are
+the project default. If a release introduced a breaking schema
+change, also follow Scenario 2 to restore the affected database
+files from a pre-update snapshot.
+
+### Scenario 2 — Data corruption or accidental destruction (PBS file restore)
+
+Use when data has been corrupted, wrongly modified, or deleted and
+an image rollback alone will not help (a user erased a critical
+record; a script ran against the wrong table; a migration broke
+something the rollback image cannot read).
+
+The procedure assumes Proxmox Backup Server is the backup target
+(see § 10). If you use a different backup tool, the restore
+mechanics differ but the file-level approach is the same.
+
+1. In PBS, identify a snapshot from BEFORE the bad event. Use the
+   PBS task log timestamps or the daily-schedule cadence to pick.
+2. Open the snapshot in PBS UI → File Restore → wait for the mount
+   to come up.
+3. Browse to the affected path under `/srv/foca/data/` (typically
+   `/srv/foca/data/sqlite/<dbname>.db` or files under
+   `/srv/foca/data/uploads/`).
+4. Download the recovered files to the deploy host (PBS UI provides
+   a download button for selected files).
+5. Stop containers, replace files in place, start containers:
+
+```bash
+cd /srv/foca
+docker compose down
+# replace the affected files in /srv/foca/data/...
+docker compose up -d
+docker compose ps
+```
+
+File-level restore is preferred over full-VM restore because it
+preserves the current `IMAGE_TAG`, `.env`, and any post-snapshot
+config changes. Full-VM restore overwrites everything; reserve it
+for Scenario 3.
+
+### Scenario 3 — Catastrophic loss (full VM restore)
+
+Use when the VM is unreachable, the OS disk has failed, or the
+entire instance has been destroyed. PBS performs a full VM restore;
+the procedure is PBS-tool-specific and the operator running PBS
+will already know it.
+
+After the restore completes, on the recovered VM:
+
+* Confirm `.env` values still match expected (`IMAGE_TAG`, JWT
+  secrets, branding strings, mail credentials).
+* `docker compose pull && docker compose up -d`.
+* Verify login works and admin pages populate as expected.
+
+For this reason — and for the Scenario 2 case — take a snapshot of
+`/srv/foca/data/sqlite/` immediately before any update.
 
 ---
 
