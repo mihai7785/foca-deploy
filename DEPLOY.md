@@ -184,7 +184,7 @@ startup or core features:
 | `PLATFORM_NAME`, `COMPANY_NAME`, `BOT_NAME`, `PLATFORM_TITLE` | Branding strings shown in the UI. Per-instance. |
 | `SMTP_*` | Required if you want the platform to send email. |
 | `IMAP_*` | Required if you want the platform to ingest a mailbox. |
-| `DEBUG=false` | **Must be false** in deployment. When true, JWT cookies omit the `Secure` flag — only safe on `localhost`. |
+| `DEBUG=false` | Gates `/api/v1/docs` (Swagger) and the OpenAPI schema. Leave `false` to avoid exposing API docs. |
 
 The `LLM_ENCRYPTION_KEY` variable is **conditional**: required only if
 you intend to manage LLM providers through the Admin UI (which
@@ -194,6 +194,21 @@ with `openssl rand -base64 32` when you need it.
 
 Optional blocks (Ollama local LLM, per-user spend quota, LangFuse
 tracing) can stay at defaults for a first deploy.
+
+### Auth cookies
+
+`JWT_COOKIE_SECURE` and `JWT_COOKIE_SAMESITE` control the `Secure` and
+`SameSite` attributes on JWT auth cookies. Defaults work for prod
+(HTTPS, strict). Override per deployment shape:
+
+* **Plain-HTTP LAN** (e.g. `http://192.168.x.y/`): set
+  `JWT_COOKIE_SECURE=false`. Browsers refuse to send `Secure` cookies
+  over `http://` and login silently fails otherwise.
+* **Behind Cloudflare Tunnel**: keep defaults. TLS terminates at
+  Cloudflare; cookies are still served over HTTPS to the browser.
+* **Cross-domain proxy setups**: may need `JWT_COOKIE_SAMESITE=lax`.
+  `none` is rarely needed and requires `Secure=true` per spec
+  (the backend logs a warning at first cookie set if you violate this).
 
 ---
 
@@ -347,8 +362,11 @@ Common causes:
 
 * Missing or wrong `ANTHROPIC_API_KEY` — the backend logs an LLM
   init error on first chat call but starts otherwise.
-* `DEBUG=true` over public HTTPS — login fails because cookies
-  aren't sent. Set `DEBUG=false` and `docker compose up -d`.
+* Cookie attributes wrong for the deployment shape — e.g. plain-HTTP
+  LAN with default `JWT_COOKIE_SECURE=true` causes the browser to
+  silently drop the cookie and every authenticated request returns
+  401. Set `JWT_COOKIE_SECURE=false` and `docker compose up -d`. See
+  § 6 "Auth cookies" for the matrix.
 * HuggingFace download in progress on first start — wait 2–3 minutes
   and re-check.
 
