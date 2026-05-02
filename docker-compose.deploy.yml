@@ -1,0 +1,83 @@
+# Deployment compose file — image-based, no source on host.
+#
+# This is the production-pattern compose used on client VMs. It is
+# intentionally separate from docker-compose.yml (which is the dev
+# compose with build directives and named volumes).
+#
+# Deploy host workflow:
+#   docker login ghcr.io                     # one-time
+#   docker compose pull                       # fetch new images
+#   docker compose up -d                      # apply
+#
+# All persistent state lives under /srv/foca/data/ as bind mounts so the
+# host filesystem can be backed up directly (Proxmox Backup Server,
+# rsync, restic, etc.) without going through Docker volume tooling.
+
+services:
+  backend:
+    image: ghcr.io/mihai7785/foca-backend:${IMAGE_TAG:-latest}
+    container_name: foca-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # SQLite databases — see DEPLOY.md for the full list of 12 DBs
+      # that live under this directory.
+      - LOGS_DIR=/data/sqlite
+      - CHROMA_DB_DIR=/data/chroma
+      - DOCUMENTS_PATH=/data/documents
+      - HF_HOME=/data/models
+      - CONNECTORS_CONFIG_DIR=/data/config
+    volumes:
+      # SQLite databases — all 12 platform DBs land here:
+      #   auth.db, audit.db, chat_history.db, usage.db, jobs.db,
+      #   email_audit.db, reminders.db, address_batches.db,
+      #   notifications.db, chat_attachments.db, api_cache.db,
+      #   platform.db
+      - /srv/foca/data/sqlite:/data/sqlite
+      # ChromaDB vector store
+      - /srv/foca/data/chroma:/data/chroma
+      # Uploaded documents + email staging + connector-fetched files
+      - /srv/foca/data/uploads:/data/documents
+      # Text application logs (reserved; backend currently logs to stdout)
+      - /srv/foca/data/logs:/data/logs
+      # HuggingFace model cache (~2GB: multilingual-e5-base + cross-encoder
+      # reranker). Persisting this avoids re-download on every container
+      # restart.
+      - /srv/foca/data/models:/data/models
+      # Connector config (connectors.yaml + connectors.secrets.yaml) so
+      # Admin UI changes survive image updates.
+      - /srv/foca/data/config:/data/config
+    networks:
+      - foca-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    # No ports published — nginx is the only entry point.
+
+  nginx:
+    image: ghcr.io/mihai7785/foca-nginx:${IMAGE_TAG:-latest}
+    container_name: foca-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # TLS certificates — managed on the host (certbot, Cloudflare cert
+      # daemon, manual cert drop). Mounted read-only so the container
+      # cannot modify them.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # ACME challenge directory for Let's Encrypt HTTP-01 if not using
+      # DNS challenges. Safe to leave even when unused.
+      - /srv/foca/data/certbot:/var/www/certbot:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - foca-net
+
+networks:
+  foca-net:
+    driver: bridge
