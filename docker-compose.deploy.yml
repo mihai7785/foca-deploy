@@ -63,15 +63,27 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      # Port 443 is published unconditionally. The http-only profile
+      # does not bind it inside the container — leaving it published
+      # is harmless. The prod-letsencrypt profile needs it.
       - "443:443"
-    volumes:
-      # TLS certificates — managed on the host (certbot, Cloudflare cert
-      # daemon, manual cert drop). Mounted read-only so the container
-      # cannot modify them.
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-      # ACME challenge directory for Let's Encrypt HTTP-01 if not using
-      # DNS challenges. Safe to leave even when unused.
-      - /srv/foca/data/certbot:/var/www/certbot:ro
+    environment:
+      # Profile selector. Must be one of:
+      #   http-only         — plain HTTP on 80 (default; safer)
+      #   prod-letsencrypt  — HTTPS on 443 with certbot certs
+      - NGINX_PROFILE=${NGINX_PROFILE:-http-only}
+      # Templated values consumed by the chosen profile (envsubst at
+      # container start). Unused vars in http-only mode are ignored.
+      - APP_DOMAIN=${APP_DOMAIN:-}
+      - LANDING_DOMAIN=${LANDING_DOMAIN:-}
+      - LETSENCRYPT_DOMAIN=${LETSENCRYPT_DOMAIN:-}
+      - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-50m}
+    # Volumes are commented out by default because http-only does not
+    # need them. Uncomment for prod-letsencrypt profile. Requires
+    # certbot-managed certs at /etc/letsencrypt on host.
+    # volumes:
+    #   - /etc/letsencrypt:/etc/letsencrypt:ro
+    #   - /srv/foca/data/certbot:/var/www/certbot:ro
     depends_on:
       backend:
         condition: service_healthy

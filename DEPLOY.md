@@ -35,10 +35,10 @@ TLS, public DNS, and tunnel/CDN setup are covered separately.
   (model cache primer on first run), and any IMAP/SMTP servers you
   configure.
 * **Ingress**: ports 80 and 443 reachable from clients (or fronted by
-  a tunnel such as Cloudflare Tunnel — see § 10).
+  a tunnel such as Cloudflare Tunnel — see § 11).
 
 For production we recommend a **separate 100 GB data disk** mounted at
-`/srv/foca/data` — see § 10 (real-client deviations) for the why.
+`/srv/foca/data` — see § 11 (real-client deviations) for the why.
 
 Install Docker on Ubuntu 24.04:
 
@@ -52,7 +52,67 @@ docker compose version
 
 ---
 
-## 3. Bootstrap commands
+## 3. Nginx profiles
+
+The nginx container picks one of two configs at start time, controlled
+by `NGINX_PROFILE` in `.env`. The default is **`http-only`** because
+it works on a fresh VM with no certificates; `prod-letsencrypt` is
+opt-in and requires extra host setup.
+
+### `http-only` (default)
+
+* Listens on port 80 only, no HTTPS.
+* `server_name _` — accepts any hostname.
+* Same React SPA + `/api` proxy + SSE behavior + security headers as
+  prod, minus HSTS (meaningless without HTTPS at the edge).
+* No landing page server block (the platform is the only thing
+  served; the landing assets remain baked in the image but unused).
+
+Use this profile for:
+
+* LAN-only deployments.
+* Instances behind a TLS-terminating proxy where the proxy handles
+  HTTPS and forwards plain HTTP to nginx — Cloudflare Tunnel, AWS
+  ALB, Traefik, or another nginx on the host.
+
+### `prod-letsencrypt` (opt-in)
+
+* Listens on 80 (HTTP→HTTPS redirect plus
+  `/.well-known/acme-challenge/` passthrough for ACME HTTP-01) and
+  443 (HTTPS).
+* Reads certs from `/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN}/`.
+* Serves the landing page on `${LANDING_DOMAIN}` (may be a
+  comma-separated list — entrypoint converts to spaces) and the
+  platform on `${APP_DOMAIN}`.
+
+To use this profile:
+
+1. Set `NGINX_PROFILE=prod-letsencrypt` in `.env` plus the four
+   templated values: `APP_DOMAIN`, `LANDING_DOMAIN`,
+   `LETSENCRYPT_DOMAIN`, `MAX_UPLOAD_SIZE`.
+2. Uncomment the `volumes:` block on the `nginx` service in
+   `docker-compose.yml` (the deploy template ships with the
+   `/etc/letsencrypt` and `/var/www/certbot` mounts commented out so
+   fresh non-prod VMs do not need those paths to exist).
+3. Ensure certbot has issued certs for the configured domain on the
+   host before starting nginx — otherwise nginx will restart-loop
+   with `[emerg] cannot load certificate`.
+
+### Picking the right profile
+
+| Situation | Profile |
+| --- | --- |
+| Local LAN, no public DNS | `http-only` |
+| Behind Cloudflare Tunnel | `http-only` |
+| Behind AWS ALB / Traefik / host nginx | `http-only` |
+| Direct internet exposure with certbot on the host | `prod-letsencrypt` |
+
+If you set `NGINX_PROFILE` to anything else, the entrypoint exits
+with a clear error before nginx starts.
+
+---
+
+## 4. Bootstrap commands
 
 Pin a specific deploy template version. Substitute the desired tag
 into `TAG`. The matching container images must already exist in GHCR
@@ -79,7 +139,7 @@ the `.deploy` version), `.env` (about to be filled in), and the empty
 
 ---
 
-## 4. GHCR authentication
+## 5. GHCR authentication
 
 The container images are private. The deploy host needs a Personal
 Access Token scoped only to read packages.
@@ -110,7 +170,7 @@ across reboots. Re-run `docker login` only when the PAT expires.
 
 ---
 
-## 5. Configure .env
+## 6. Configure .env
 
 Open `/srv/foca/.env` and fill in real values. The blocks that gate
 startup or core features:
@@ -137,7 +197,7 @@ tracing) can stay at defaults for a first deploy.
 
 ---
 
-## 6. Start the instance
+## 7. Start the instance
 
 ```bash
 cd /srv/foca
@@ -156,11 +216,11 @@ download into `/srv/foca/data/models/` (~2 GB). After that, the cache
 persists and restarts are fast.
 
 If `docker compose ps` shows `foca-backend (unhealthy)`, jump to
-§ 9 (Troubleshooting).
+§ 12 (Troubleshooting).
 
 ---
 
-## 7. Update procedure
+## 8. Update procedure
 
 **Instance pinned to `:latest`** (non-production):
 
@@ -185,7 +245,7 @@ not re-read `.env`, so an `IMAGE_TAG` change goes unnoticed.
 
 ---
 
-## 8. Rollback procedure
+## 9. Rollback procedure
 
 1. Edit `/srv/foca/.env` and set `IMAGE_TAG` to a known-good prior
    version (e.g. `v2.25.2`).
@@ -197,7 +257,7 @@ applied during the newer version's run remain applied. If a release
 introduced a breaking schema change, you also need to:
 
 * Stop the stack: `docker compose down`.
-* Restore database files from backup (see § 9).
+* Restore database files from backup (see § 10).
 * Start with the older `IMAGE_TAG`.
 
 For this reason, **take a backup of `/srv/foca/data/sqlite/`
@@ -205,7 +265,7 @@ immediately before any update.**
 
 ---
 
-## 9. Backup
+## 10. Backup
 
 What to back up:
 
@@ -239,7 +299,7 @@ disk failure or a destructive `docker compose down -v`.
 
 ---
 
-## 10. Real-client deviations
+## 11. Real-client deviations
 
 For paying-client deployments, deviate from the defaults as follows:
 
@@ -258,11 +318,11 @@ For paying-client deployments, deviate from the defaults as follows:
   exposure works but burns a public IP and requires manual TLS cert
   management. A separate guide will cover the tunnel setup.
 * **Rotate the GHCR PAT yearly.** Calendar reminder, not a TODO.
-* **Snapshot SQLite before every update.** See § 9.
+* **Snapshot SQLite before every update.** See § 10.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **`docker login ghcr.io` returns `denied: denied`.**
 The PAT lacks the `read:packages` scope. Re-create the token at
@@ -310,7 +370,7 @@ host ownership.
 
 ---
 
-## 12. Where to get help
+## 13. Where to get help
 
 * For deployment / template issues: open an issue on
   https://github.com/mihai7785/foca-deploy/issues — public, no
