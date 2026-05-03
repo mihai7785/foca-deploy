@@ -1,0 +1,20 @@
+# foca-update.service — invokes /usr/local/bin/foca-update.
+# Triggered by foca-update.timer; not intended to be enabled directly.
+#
+# Operator: edit `User=` to match the user that owns /srv/foca and is
+# in the `docker` group on this host. Default below is `mihai`.
+
+[Unit]
+Description=Foca image-pull and reconcile
+Documentation=https://github.com/mihai7785/foca-deploy/blob/main/DEPLOY.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mihai
+WorkingDirectory=/srv/foca
+ExecStart=/usr/local/bin/foca-update
+StandardOutput=journal
+StandardError=journal

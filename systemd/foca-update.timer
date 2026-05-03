@@ -1,0 +1,23 @@
+# foca-update.timer — drives foca-update.service on a 10-minute cadence.
+#
+# OnBootSec=2min defers the first post-boot run so docker.service and
+# network-online.target have time to settle before the script runs.
+# OnUnitActiveSec=10min then fires the next run 10 minutes after the
+# previous one completed.
+#
+# Persistent=true is included for forward compatibility — it has no
+# effect on monotonic timers (OnBootSec / OnUnitActiveSec). Switch to
+# OnCalendar=*:0/10 to get genuine missed-run catch-up after downtime.
+
+[Unit]
+Description=Run foca-update every 10 minutes
+Documentation=https://github.com/mihai7785/foca-deploy/blob/main/DEPLOY.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=foca-update.service
+
+[Install]
+WantedBy=timers.target
