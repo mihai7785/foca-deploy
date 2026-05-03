@@ -35,10 +35,10 @@ TLS, public DNS, and tunnel/CDN setup are covered separately.
   (model cache primer on first run), and any IMAP/SMTP servers you
   configure.
 * **Ingress**: ports 80 and 443 reachable from clients (or fronted by
-  a tunnel such as Cloudflare Tunnel — see § 12).
+  a tunnel such as Cloudflare Tunnel — see § 13).
 
 For production we recommend a **separate 100 GB data disk** mounted at
-`/srv/foca/data` — see § 12 (real-client deviations) for the why.
+`/srv/foca/data` — see § 13 (real-client deviations) for the why.
 
 Install Docker on Ubuntu 24.04:
 
@@ -335,7 +335,7 @@ download into `/srv/foca/data/models/` (~2 GB). After that, the cache
 persists and restarts are fast.
 
 If `docker compose ps` shows `foca-backend (unhealthy)`, jump to
-§ 13 (Troubleshooting).
+§ 14 (Troubleshooting).
 
 ---
 
@@ -364,7 +364,104 @@ not re-read `.env`, so an `IMAGE_TAG` change goes unnoticed.
 
 ---
 
-## 10. Rollback procedure
+## 10. Auto-update strategy (optional)
+
+By default, Foca instances are updated by hand: edit `IMAGE_TAG` in
+`.env`, `docker compose pull`, `docker compose up -d`. For instances
+that prefer automation, this repo ships a small script + systemd
+units. Read [§ Auto-update mechanism](#auto-update-mechanism) and
+the [LIMITATION](#limitation) at the end of this section before
+opting in.
+
+### IMAGE_TAG strategy — three tiers
+
+Pick one based on risk tolerance:
+
+* **Pinned (recommended for production clients)** — `IMAGE_TAG=v2.25.4`
+  or another exact version. Updates require operator action: edit
+  `.env`, pull, restart. Most controlled, safest. This is the
+  default in `.env.deploy.example`.
+* **Mutable stable** — `IMAGE_TAG=stable`. The platform team moves
+  the `stable` tag in GHCR when a release is approved for opt-in
+  clients. Each release reaches stable-tag clients only after the
+  tag move. *(Note: the `stable` tag is not yet implemented in the
+  build pipeline; this is forward-looking documentation.)*
+* **Latest (canary only)** — `IMAGE_TAG=latest`. Every push to main
+  becomes the new `:latest`. Used by Focalabs internal canary
+  instances (e.g., afumati) to validate releases before promoting.
+  **Not recommended for production clients.**
+
+### Auto-update mechanism
+
+Optional. Typically only worth installing on canary instances on
+`IMAGE_TAG=latest` (or future `IMAGE_TAG=stable`). Three template
+files in this repo:
+
+* `scripts/foca-update.sh` — pulls images and reconciles containers.
+  Locks against concurrent invocations with `flock`.
+* `systemd/foca-update.service` — oneshot service that runs the
+  script. `After=docker.service` so docker is up first.
+* `systemd/foca-update.timer` — fires the service every 10 minutes
+  (`OnBootSec=2min` for first post-boot run, `OnUnitActiveSec=10min`
+  thereafter).
+
+To install on a deploy host (assuming the deploy user is `mihai`
+and the deploy directory is `/srv/foca`):
+
+```bash
+# Copy script
+sudo cp scripts/foca-update.sh /usr/local/bin/foca-update
+sudo chmod +x /usr/local/bin/foca-update
+
+# Copy systemd units (verify User= line in .service matches your deploy user)
+sudo cp systemd/foca-update.service /etc/systemd/system/
+sudo cp systemd/foca-update.timer /etc/systemd/system/
+
+# Reload systemd, enable and start the timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now foca-update.timer
+
+# Verify
+sudo systemctl list-timers foca-update.timer
+journalctl -u foca-update.service -n 20
+```
+
+The timer runs the update every 10 minutes. Logs go to the journal
+(`journalctl -u foca-update.service`). The script is idempotent —
+when no new image is available, `docker compose up -d` is a no-op.
+
+### LIMITATION
+
+**Auto-update is safe only for image-compatible releases** —
+releases where the new image runs against the existing `.env` and
+`docker-compose.yml` without modification.
+
+Releases that change the deployment contract require operator
+intervention BEFORE the auto-update runs. Otherwise the new image
+fails its healthcheck and the instance goes down until manually
+fixed. Examples of contract-changing releases:
+
+* New required environment variable in `.env`
+* Changed `docker-compose.yml` (new services, new volumes, removed
+  services, new bind-mount paths)
+* Schema repair beyond what the platform's startup migration runner
+  handles
+
+Foca's track record on releases that required operator action:
+
+* **v2.25.3** — required setting `NGINX_PROFILE` in `.env`.
+* **v2.25.4** — required setting `JWT_COOKIE_SECURE` and
+  `JWT_COOKIE_SAMESITE` in `.env`.
+
+The platform's release notes flag the required operator action for
+contract-changing releases. Until that action is applied, an
+auto-updating instance pinned to `latest` will pull the new image,
+fail to start, and stay broken until you intervene. **For real
+client deployments, prefer pinned image tags and update manually.**
+
+---
+
+## 11. Rollback procedure
 
 Three distinct recovery scenarios. Pick the right one for the
 failure mode — image-tag rollback is fast and lossless when data
@@ -403,7 +500,7 @@ record; a script ran against the wrong table; a migration broke
 something the rollback image cannot read).
 
 The procedure assumes Proxmox Backup Server is the backup target
-(see § 11). If you use a different backup tool, the restore
+(see § 12). If you use a different backup tool, the restore
 mechanics differ but the file-level approach is the same.
 
 1. In PBS, identify a snapshot from BEFORE the bad event. Use the
@@ -449,7 +546,7 @@ For this reason — and for the Scenario 2 case — take a snapshot of
 
 ---
 
-## 11. Backup
+## 12. Backup
 
 What to back up:
 
@@ -483,7 +580,7 @@ disk failure or a destructive `docker compose down -v`.
 
 ---
 
-## 12. Real-client deviations
+## 13. Real-client deviations
 
 For paying-client deployments, deviate from the defaults as follows:
 
@@ -502,11 +599,11 @@ For paying-client deployments, deviate from the defaults as follows:
   exposure works but burns a public IP and requires manual TLS cert
   management. A separate guide will cover the tunnel setup.
 * **Rotate the GHCR PAT yearly.** Calendar reminder, not a TODO.
-* **Snapshot SQLite before every update.** See § 11.
+* **Snapshot SQLite before every update.** See § 12.
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 **`docker login ghcr.io` returns `denied: denied`.**
 The PAT lacks the `read:packages` scope. Re-create the token at
@@ -557,7 +654,7 @@ host ownership.
 
 ---
 
-## 14. Where to get help
+## 15. Where to get help
 
 * For deployment / template issues: open an issue on
   https://github.com/mihai7785/foca-deploy/issues — public, no
