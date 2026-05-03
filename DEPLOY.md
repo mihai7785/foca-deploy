@@ -35,10 +35,10 @@ TLS, public DNS, and tunnel/CDN setup are covered separately.
   (model cache primer on first run), and any IMAP/SMTP servers you
   configure.
 * **Ingress**: ports 80 and 443 reachable from clients (or fronted by
-  a tunnel such as Cloudflare Tunnel — see § 11).
+  a tunnel such as Cloudflare Tunnel — see § 12).
 
 For production we recommend a **separate 100 GB data disk** mounted at
-`/srv/foca/data` — see § 11 (real-client deviations) for the why.
+`/srv/foca/data` — see § 12 (real-client deviations) for the why.
 
 Install Docker on Ubuntu 24.04:
 
@@ -112,7 +112,111 @@ with a clear error before nginx starts.
 
 ---
 
-## 4. Bootstrap commands
+## 4. Deployment patterns
+
+Foca runs in one of two validated patterns. Pick before bootstrap —
+the pattern determines `NGINX_PROFILE`, `JWT_COOKIE_SECURE`, the cert
+story, and whether you need to touch your firewall.
+
+### Pattern A — Direct public IP with Let's Encrypt
+
+Use when the deploy host has a routable public IPv4 and you control
+its inbound ports — VPS, cloud VM, colocation, dedicated server with
+port-forward control. Production example: `app.focalabs.ro` on the
+Contabo VPS.
+
+Setup:
+
+* Open ports 80 and 443 from the internet to the host.
+* Run certbot on the host (or sidecar) to obtain and renew Let's
+  Encrypt certs at `/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN}/`.
+* Uncomment the `/etc/letsencrypt` and `/var/www/certbot` volume
+  mounts on the `nginx` service in `docker-compose.yml` (see § 3).
+* In `.env`:
+  * `NGINX_PROFILE=prod-letsencrypt`
+  * `APP_DOMAIN`, `LANDING_DOMAIN`, `LETSENCRYPT_DOMAIN` filled in
+  * `JWT_COOKIE_SECURE=true` (the platform is served over HTTPS only)
+* Point the public DNS A record at the host's IP.
+
+Tradeoffs:
+
+* **Pros:** simple, single-layer, no third-party dependency, full
+  control over TLS.
+* **Cons:** requires a public IP, requires firewall/router work,
+  exposes the origin IP to scanners and probes, you handle cert
+  renewal and the renewal hook into the running container.
+
+### Pattern B — Cloudflare Tunnel (NAT / office deployment)
+
+Use when the deploy host is behind NAT, has no public IP, runs on
+home or office-grade internet, or you want to hide the origin IP
+from scanners. Production example: `afumati.focalabs.ro` on a
+Proxmox VM behind a residential router.
+
+Setup:
+
+* The parent domain's DNS must already be on Cloudflare (changing
+  authoritative DNS is a separate decision; if you can't move it,
+  this pattern doesn't apply).
+* Install `cloudflared` as a systemd service on the deploy host.
+  The Cloudflare Zero Trust dashboard generates a token-based
+  install command per tunnel; run it on the host once.
+* Configure ingress in the Cloudflare dashboard:
+  `<hostname>` → `http://localhost:80`. Cloudflare auto-creates a
+  CNAME proxied through their edge.
+* In `.env`:
+  * `NGINX_PROFILE=http-only` — Cloudflare terminates TLS at the
+    edge and `cloudflared` connects to `localhost:80` over plain
+    HTTP, so nginx serves plain HTTP locally.
+  * `JWT_COOKIE_SECURE=false` if you want simultaneous LAN access
+    (LAN clients hit the same nginx over plain HTTP at the LAN IP).
+    Set `true` if only the public hostname matters — Cloudflare
+    presents HTTPS at the edge, so cookies sent from the browser
+    are over HTTPS.
+* No port forwarding on the router. Inbound traffic flows through
+  the outbound `cloudflared` connection to Cloudflare's edge.
+
+Tradeoffs:
+
+* **Pros:** zero inbound exposure, works behind NAT, free auto-
+  renewing TLS at the edge, origin IP hidden from public scans.
+* **Cons:** third-party dependency on Cloudflare, free-tier
+  request and timeout limits (see below).
+
+#### Cloudflare free-tier considerations
+
+Three concrete numbers worth knowing before relying on Pattern B
+for anything large or long-running:
+
+* **Maximum request body**: 100 MB on Free / Pro plans, 200 MB on
+  Business, 500 MB+ on Enterprise. Set `MAX_UPLOAD_SIZE` in `.env`
+  at or below the plan's ceiling. Afumati uses
+  `MAX_UPLOAD_SIZE=50m` which is comfortable.
+* **Edge timeout**: 120 seconds. Backend SSE / streaming endpoints
+  must send data or a keepalive within this window or the edge
+  drops the connection. Foca's chat-stream endpoint is
+  well below this in practice.
+* **SSE through the edge**: tested and working with Cloudflare
+  defaults as of May 2026 (afumati). If a future Cloudflare change
+  breaks it, the fix is a Configuration Rule that disables Browser
+  Cache and any "Performance" optimizations for the `/api/` path.
+
+### Mixing patterns on one instance
+
+A single Foca instance uses one pattern at a time, but Pattern B
+covers both public-internet and in-office LAN access for the same
+deployment: Cloudflare handles HTTPS for remote users; LAN clients
+hit the same nginx on plain HTTP at the LAN IP. Keep
+`JWT_COOKIE_SECURE=false` so cookies survive both paths.
+
+Pattern A does not naturally serve LAN clients — they would have to
+either trust the public certificate over a LAN-resolved hostname or
+use a separate hostname with a different cert. If you need LAN +
+public on Pattern A, use Pattern B instead.
+
+---
+
+## 5. Bootstrap commands
 
 Pin a specific deploy template version. Substitute the desired tag
 into `TAG`. The matching container images must already exist in GHCR
@@ -139,7 +243,7 @@ the `.deploy` version), `.env` (about to be filled in), and the empty
 
 ---
 
-## 5. GHCR authentication
+## 6. GHCR authentication
 
 The container images are private. The deploy host needs a Personal
 Access Token scoped only to read packages.
@@ -170,7 +274,7 @@ across reboots. Re-run `docker login` only when the PAT expires.
 
 ---
 
-## 6. Configure .env
+## 7. Configure .env
 
 Open `/srv/foca/.env` and fill in real values. The blocks that gate
 startup or core features:
@@ -212,7 +316,7 @@ tracing) can stay at defaults for a first deploy.
 
 ---
 
-## 7. Start the instance
+## 8. Start the instance
 
 ```bash
 cd /srv/foca
@@ -231,11 +335,11 @@ download into `/srv/foca/data/models/` (~2 GB). After that, the cache
 persists and restarts are fast.
 
 If `docker compose ps` shows `foca-backend (unhealthy)`, jump to
-§ 12 (Troubleshooting).
+§ 13 (Troubleshooting).
 
 ---
 
-## 8. Update procedure
+## 9. Update procedure
 
 **Instance pinned to `:latest`** (non-production):
 
@@ -260,7 +364,7 @@ not re-read `.env`, so an `IMAGE_TAG` change goes unnoticed.
 
 ---
 
-## 9. Rollback procedure
+## 10. Rollback procedure
 
 Three distinct recovery scenarios. Pick the right one for the
 failure mode — image-tag rollback is fast and lossless when data
@@ -299,7 +403,7 @@ record; a script ran against the wrong table; a migration broke
 something the rollback image cannot read).
 
 The procedure assumes Proxmox Backup Server is the backup target
-(see § 10). If you use a different backup tool, the restore
+(see § 11). If you use a different backup tool, the restore
 mechanics differ but the file-level approach is the same.
 
 1. In PBS, identify a snapshot from BEFORE the bad event. Use the
@@ -345,7 +449,7 @@ For this reason — and for the Scenario 2 case — take a snapshot of
 
 ---
 
-## 10. Backup
+## 11. Backup
 
 What to back up:
 
@@ -379,7 +483,7 @@ disk failure or a destructive `docker compose down -v`.
 
 ---
 
-## 11. Real-client deviations
+## 12. Real-client deviations
 
 For paying-client deployments, deviate from the defaults as follows:
 
@@ -398,11 +502,11 @@ For paying-client deployments, deviate from the defaults as follows:
   exposure works but burns a public IP and requires manual TLS cert
   management. A separate guide will cover the tunnel setup.
 * **Rotate the GHCR PAT yearly.** Calendar reminder, not a TODO.
-* **Snapshot SQLite before every update.** See § 10.
+* **Snapshot SQLite before every update.** See § 11.
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 **`docker login ghcr.io` returns `denied: denied`.**
 The PAT lacks the `read:packages` scope. Re-create the token at
@@ -431,7 +535,7 @@ Common causes:
   LAN with default `JWT_COOKIE_SECURE=true` causes the browser to
   silently drop the cookie and every authenticated request returns
   401. Set `JWT_COOKIE_SECURE=false` and `docker compose up -d`. See
-  § 6 "Auth cookies" for the matrix.
+  § 7 "Auth cookies" for the matrix.
 * HuggingFace download in progress on first start — wait 2–3 minutes
   and re-check.
 
@@ -453,7 +557,7 @@ host ownership.
 
 ---
 
-## 13. Where to get help
+## 14. Where to get help
 
 * For deployment / template issues: open an issue on
   https://github.com/mihai7785/foca-deploy/issues — public, no
